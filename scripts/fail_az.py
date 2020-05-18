@@ -299,23 +299,26 @@ def run(region, az_name, vpc_id, duration, limit_asg, failover_rds, failover_ela
         original_asg = limit_auto_scaling(autoscaling_client, subnets_to_chaos)
     else:
         original_asg = None
+    try:
+        # Blackhole networking to EC2 instances in failed AZ
+        save_for_rollback = apply_chaos_config(ec2_client, nacl_ids, chaos_nacl_id)
 
-    # Blackhole networking to EC2 instances in failed AZ
-    save_for_rollback = apply_chaos_config(ec2_client, nacl_ids, chaos_nacl_id)
+        # Fail-over RDS if in the "failed" AZ
+        if failover_rds:
+            rds_client = boto3.client('rds', region_name=region)
+            force_failover_rds(rds_client, vpc_id, az_name)
 
-    # Fail-over RDS if in the "failed" AZ
-    if failover_rds:
-        rds_client = boto3.client('rds', region_name=region)
-        force_failover_rds(rds_client, vpc_id, az_name)
+        # Fail-over Elasticache if in the "failed" AZ
+        if failover_elasticache:
+            elasticache_client = boto3.client('elasticache', region_name=region)
+            force_failover_elasticache(elasticache_client, az_name)
 
-    # Fail-over Elasticache if in the "failed" AZ
-    if failover_elasticache:
-        elasticache_client = boto3.client('elasticache', region_name=region)
-        force_failover_elasticache(elasticache_client, az_name)
-
-    time.sleep(duration)
-    rollback(ec2_client, save_for_rollback,  autoscaling_client, original_asg)
-    delete_chaos_nacl(ec2_client, chaos_nacl_id)
+        time.sleep(duration)
+    except KeyboardInterrupt:
+        logger.info("Chaos aborted early by keyboard interrupt")
+    finally:
+        rollback(ec2_client, save_for_rollback,  autoscaling_client, original_asg)
+        delete_chaos_nacl(ec2_client, chaos_nacl_id)
 
 
 def entry_point():
