@@ -42,6 +42,8 @@ def get_arguments():
                         help='Failover RDS if master in the blackout subnet')
     parser.add_argument('--failover-elasticache', default=False, action='store_true',
                         help='Failover Elasticache if primary in the blackout subnet')
+    parser.add_argument('--confirm-failover', default=False, action='store_true',
+                        help="auto confirm RDS and Elasticache failovers without interactive prompt")
     parser.add_argument('--log-level', type=str, default='INFO',
                         help='Python log level. INFO, DEBUG, etc.')
     return parser.parse_args()
@@ -205,7 +207,7 @@ def confirm_choice():
     return confirm
 
 
-def force_failover_rds(rds_client, vpc_id, az_name):
+def force_failover_rds(rds_client, vpc_id, az_name, confirm_failover=False):
     logger = logging.getLogger(__name__)
     # Find RDS master instances within the AZ
     rds_dbs = rds_client.describe_db_instances()
@@ -216,10 +218,14 @@ def force_failover_rds(rds_client, vpc_id, az_name):
                     'Database found in VPC: %s and AZ: %s', rds_db[
                         'DBInstanceIdentifier'], rds_db['AvailabilityZone']
                 )
+                # ask for interactive input if not specified
+                if not confirm_failover:
+                    choice = confirm_choice()
+                    confirm_failover = True if choice == 'c' else False
+
                 # if RDS master is multi-az and in blackholed AZ
-                # force reboot with failover
-                confirm = confirm_choice()
-                if confirm == 'c':
+                # force reboot with failover                
+                if confirm_failover:
                     logger.info('Force reboot/failover')
                     rds_client.reboot_db_instance(
                         DBInstanceIdentifier=rds_db['DBInstanceIdentifier'],
@@ -229,7 +235,7 @@ def force_failover_rds(rds_client, vpc_id, az_name):
                     logger.info('Failover aborted')
 
 
-def force_failover_elasticache(elasticache_client, az_name):
+def force_failover_elasticache(elasticache_client, az_name, confirm_failover=False):
     logger = logging.getLogger(__name__)
     replication_groups = elasticache_client.describe_replication_groups()
     for replication in replication_groups['ReplicationGroups']:
@@ -247,8 +253,13 @@ def force_failover_elasticache(elasticache_client, az_name):
                             NodeGroupId,
                             node['PreferredAvailabilityZone']
                         )
-                        confirm = confirm_choice()
-                        if confirm == 'c':
+                        
+                        # ask for interactive input if not specified
+                        if not confirm_failover:
+                            choice = confirm_choice()
+                            confirm_failover = True if choice == 'c' else False
+
+                        if confirm_failover:
                             logger.info('Force automatic failover; no rollback possible')
                             elasticache_client.test_failover(
                                 ReplicationGroupId=ReplicationGroupId,
@@ -284,7 +295,7 @@ def delete_chaos_nacl(ec2_client, chaos_nacl_id):
     )
 
 
-def run(region, az_name, vpc_id, duration, limit_asg, failover_rds, failover_elasticache, log_level='INFO'):
+def run(region, az_name, vpc_id, duration, limit_asg, failover_rds, failover_elasticache, log_level='INFO', confirm_failover=False):
     setup_logging(log_level)
     logger = logging.getLogger(__name__)
     logger.info('Setting up ec2 client for region %s ', region)
@@ -306,12 +317,12 @@ def run(region, az_name, vpc_id, duration, limit_asg, failover_rds, failover_ela
         # Fail-over RDS if in the "failed" AZ
         if failover_rds:
             rds_client = boto3.client('rds', region_name=region)
-            force_failover_rds(rds_client, vpc_id, az_name)
+            force_failover_rds(rds_client, vpc_id, az_name, confirm_failover=confirm_failover)
 
         # Fail-over Elasticache if in the "failed" AZ
         if failover_elasticache:
             elasticache_client = boto3.client('elasticache', region_name=region)
-            force_failover_elasticache(elasticache_client, az_name)
+            force_failover_elasticache(elasticache_client, az_name, confirm_failover=confirm_failover)
 
         time.sleep(duration)
     except KeyboardInterrupt:
@@ -332,7 +343,8 @@ def entry_point():
         args.limit_asg,
         args.failover_rds,
         args.failover_elasticache,
-        args.log_level
+        args.log_level,
+        args.confirm_failover
     )
 
 
